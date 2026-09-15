@@ -58,11 +58,14 @@ export class UIManager {
     private plugin: SRPlugin;
     private settingsManager: SettingsManager;
     private ribbonIcon: HTMLElement | null = null;
+    private reviewModal: SRModalView | null = null;
     private externalModalObserver: MutationObserver | null = null;
 
     constructor(plugin: SRPlugin, settingsManager: SettingsManager) {
         this.plugin = plugin;
         this.settingsManager = settingsManager;
+        // 非模态窗口可能在停用插件时仍然打开，必须释放其原文监听与拖动事件。
+        this.plugin.register(() => this.reviewModal?.close());
         appIcon();
         this.tabViewManager = new TabViewManager(this.plugin, this.settingsManager);
         this.tabViewManager.registerAllTabViews();
@@ -432,15 +435,18 @@ export class UIManager {
         this.focusObsidianWindow();
     }
 
+    /** 每次只维护一个复习浮窗，替换旧会话时先清理其原文监听。 */
     public openFlashcardModal(reviewQueueLoader: ReviewQueueLoader): void {
+        this.reviewModal?.close();
         this.setSRViewInFocus(true);
         this.focusObsidianWindow();
-        new SRModalView(
+        this.reviewModal = new SRModalView(
             this.plugin.app,
             this.plugin,
             this.settingsManager,
             reviewQueueLoader,
-        ).open();
+        );
+        this.reviewModal.open();
     }
 
     public setSRViewInFocus(value: boolean) {

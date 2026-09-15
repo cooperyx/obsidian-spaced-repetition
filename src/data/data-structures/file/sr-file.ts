@@ -27,6 +27,8 @@ export interface ISRFile {
     getTextDirection(): TextDirection;
     read(): Promise<string>;
     write(content: string): Promise<void>;
+    /** 在最新文件内容上原子更新，避免读写之间覆盖编辑器刚保存的修改。 */
+    process?(update: (content: string) => string): Promise<string>;
 }
 
 // The Obsidian frontmatter cache doesn't include the line number for the specific tag.
@@ -222,5 +224,10 @@ export abstract class SRTFile implements ISRFile {
      */
     async write(content: string): Promise<void> {
         await this.vault.modify(this.file, content);
+    }
+
+    /** 使用 Obsidian 的原子读改写接口，仅替换已核实的卡片源范围。 */
+    async process(update: (content: string) => string): Promise<string> {
+        return this.vault.process(this.file, update);
     }
 }

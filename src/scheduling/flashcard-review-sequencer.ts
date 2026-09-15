@@ -1,4 +1,5 @@
 import { Notice } from "obsidian";
+import { State } from "ts-fsrs";
 
 import { TICKS_PER_DAY } from "src/data/constants";
 import { DataStore } from "src/data/data-store/base/data-store";
@@ -17,6 +18,7 @@ import { Note } from "src/note/note";
 import { ISRAlgorithm } from "src/scheduling/algorithms/base/isr-algorithm";
 import { RepItemScheduleInfo } from "src/scheduling/algorithms/base/rep-item-schedule-info";
 import { RepItemState, ReviewResponse } from "src/scheduling/algorithms/base/repetition-item";
+import { RepItemScheduleInfoFsrs } from "src/scheduling/algorithms/fsrs/rep-item-schedule-info-fsrs";
 import { DueDateHistogram } from "src/scheduling/due-date-histogram";
 import { globalDateProvider } from "src/utils/dates";
 
@@ -38,6 +40,7 @@ export interface IFlashcardReviewSequencer {
     skipCurrentCard(): void;
     determineCardSchedule(response: ReviewResponse, card: Card): RepItemScheduleInfo;
     processReview(response: ReviewResponse): Promise<void>;
+    processManualReview(days: number): Promise<void>;
     updateCurrentQuestionTextAndCards(text: string): Promise<void>;
     deleteCurrentCardFromNote(): Promise<void>;
 }
@@ -280,6 +283,30 @@ export class FlashcardReviewSequencer implements IFlashcardReviewSequencer {
         }
     }
 
+    /**
+     * 按用户指定的自然日安排当前卡片。
+     *
+     * 先以 Good 推进算法内部状态，再覆盖到期日和间隔：FSRS 的稳定度、难度、
+     * 复习次数与状态因此仍由算法维护，而用户选择的天数始终是最终到期日期。
+     */
+    async processManualReview(days: number): Promise<void> {
+        if (!Number.isSafeInteger(days) || days < 1) {
+            throw new RangeError("Manual review days must be a positive integer.");
+        }
+
+        switch (this.reviewMode) {
+            case FlashcardReviewMode.Review:
+                await this.processManualReviewReviewMode(days);
+                break;
+
+            case FlashcardReviewMode.Cram:
+                // Cram 模式不持久化调度；沿用其“完成当前卡片”的既有队列语义。
+                this.processReviewCramMode(ReviewResponse.Easy);
+                break;
+        }
+    }
+
+    /** 沿用上游评分调度；保存失败时恢复旧计划，只有写入成功才推进队列。 */
     async processReviewReviewMode(response: ReviewResponse): Promise<void> {
         let shortTermRequeue: "none" | "immediate" | "pending" = "none";
         if (response !== ReviewResponse.Reset || this.currentCard.hasSchedule) {
@@ -292,8 +319,13 @@ export class FlashcardReviewSequencer implements IFlashcardReviewSequencer {
             this.currentCard.scheduleInfo = this.determineCardSchedule(response, this.currentCard);
             shortTermRequeue = this.getShortTermRequeueMode(this.currentCard.scheduleInfo);
 
-            // Update the source file with the updated schedule
-            await DataStore.getInstance().writeSchedule(this.currentQuestion);
+            // 先持久化再移动队列。写入失败时不能让内存状态领先于笔记内容。
+            try {
+                await DataStore.getInstance().writeSchedule(this.currentQuestion);
+            } catch (error) {
+                this.currentCard.scheduleInfo = oldSchedule;
+                throw error;
+            }
 
             if (oldSchedule) {
                 const now: number = globalDateProvider.now.valueOf();
@@ -323,6 +355,55 @@ export class FlashcardReviewSequencer implements IFlashcardReviewSequencer {
                 this.deleteCurrentCard();
             }
         }
+    }
+
+    private async processManualReviewReviewMode(days: number): Promise<void> {
+        const oldSchedule = this.currentCard.scheduleInfo;
+        const newSchedule = this.determineCardSchedule(ReviewResponse.Good, this.currentCard);
+
+        // 使用实际点击日期，不能沿用上游可配置的“复习日分界时间”；按日历加天以兼容夏令时。
+        newSchedule.dueDate = globalDateProvider.now.clone().startOf("day").add(days, "days");
+        if (!newSchedule.dueDate.isValid() || newSchedule.dueDate.year() > 9999) {
+            throw new RangeError("天数超出笔记调度日期支持的范围。");
+        }
+        newSchedule.interval = days;
+        newSchedule.delayedBeforeReviewTicks = 0;
+
+        if (newSchedule instanceof RepItemScheduleInfoFsrs) {
+            // 手动跨天排期结束短期学习，避免下次 Again 落入与天级到期日矛盾的学习步骤。
+            newSchedule.state = State.Review;
+            newSchedule.learningSteps = 0;
+        }
+
+        this.currentCard.scheduleInfo = newSchedule;
+
+        try {
+            await DataStore.getInstance().writeSchedule(this.currentQuestion);
+        } catch (error) {
+            this.currentCard.scheduleInfo = oldSchedule;
+            throw error;
+        }
+        this.updateDueDateHistogram(oldSchedule, newSchedule);
+
+        if (this.settings.burySiblingCards) {
+            await this.burySiblingCards();
+            this.cardSequencer.deleteCurrentQuestionFromAllDecks();
+        } else {
+            // 只移除已安排的当前卡片，其他同级卡片保持各自已有计划。
+            this.deleteCurrentCard();
+        }
+    }
+
+    private updateDueDateHistogram(
+        oldSchedule: RepItemScheduleInfo | null,
+        newSchedule: RepItemScheduleInfo,
+    ): void {
+        if (oldSchedule) {
+            const now: number = globalDateProvider.now.valueOf();
+            const nDays: number = Math.ceil((oldSchedule.dueDateAsUnix - now) / TICKS_PER_DAY);
+            this.dueDateFlashcardHistogram.decrement(nDays);
+        }
+        this.dueDateFlashcardHistogram.increment(newSchedule.interval);
     }
 
     private async burySiblingCards(): Promise<void> {
@@ -438,7 +519,8 @@ export class FlashcardReviewSequencer implements IFlashcardReviewSequencer {
 
         q.actualQuestion = text;
 
-        await this.currentQuestion.writeQuestion(this.settings);
+        // 统一经过原子写入与源快照更新，后续评分才能作用于刚编辑后的内容。
+        await DataStore.getInstance().write(this.currentQuestion);
 
         if (cardFrontBackList.length !== question.cards.length) {
             console.warn("SR: Cards count does not match question text. Skipping redraw.");

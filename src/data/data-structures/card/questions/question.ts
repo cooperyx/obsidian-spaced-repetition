@@ -13,8 +13,9 @@ import {
 } from "src/data/data-structures/deck/topic-path";
 import { SRSettings } from "src/data/settings";
 import { Note } from "src/note/note";
+import { replaceQuestionSource } from "src/note/replace-question-source";
 import { ParsedQuestionInfo } from "src/parser";
-import { cyrb53, MultiLineTextFinder, stringTrimStart, TextDirection } from "src/utils/strings";
+import { cyrb53, stringTrimStart, TextDirection } from "src/utils/strings";
 
 export enum CardType {
     SingleLineBasic,
@@ -196,6 +197,8 @@ export class Question {
     questionContext: string[];
     cards: Card[];
     hasChanged: boolean;
+    /** 保存后无法确认原卡片身份时，停止对该队列项写入。重新载入卡组后重建。 */
+    reviewSourceInvalid = false;
 
     get questionType(): CardType {
         return this.parsedQuestionInfo.cardType;
@@ -275,6 +278,7 @@ export class Question {
         return result;
     }
 
+    /** 按已知源行替换本题，保留其他内容；无法唯一确认源范围时抛错。 */
     updateQuestionWithinNoteText(noteText: string, settings: SRSettings): string {
         const originalText: string = this.questionText.original;
 
@@ -284,7 +288,12 @@ export class Question {
         //      3. the schedule HTML comment (if present)
         const replacementText = this.formatForNote(settings);
 
-        let newText = MultiLineTextFinder.findAndReplace(noteText, originalText, replacementText);
+        const newText = replaceQuestionSource(
+            noteText,
+            originalText,
+            replacementText,
+            this.parsedQuestionInfo?.firstLineNum,
+        );
         if (newText) {
             // Don't support changing the textDirection setting
             this.questionText = QuestionText.create(
@@ -292,14 +301,6 @@ export class Question {
                 this.questionText.textDirection,
                 settings,
             );
-        } else {
-            console.warn(
-                `updateQuestionText: Text not found: ${originalText.substring(
-                    0,
-                    100,
-                )} in note: ${noteText.substring(0, 100)}`,
-            );
-            newText = noteText;
         }
         return newText;
     }

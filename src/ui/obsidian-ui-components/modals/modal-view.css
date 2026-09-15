@@ -16,8 +16,42 @@
     display: none;
 }
 
-body:not(.is-mobile) #sr-modal-view {
-    resize: both;
+body:not(.is-mobile) .sr-floating-modal-container {
+    background: transparent;
+    pointer-events: none;
+}
+
+body:not(.is-mobile) .sr-floating-modal-container .modal-bg {
+    display: none;
+}
+
+body:not(.is-mobile) .sr-floating-modal-container #sr-modal-view {
+    position: fixed;
+    margin: 0;
+    pointer-events: auto;
+    resize: none;
+}
+
+#sr-modal-view .sr-floating-window-drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--size-4-5);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+
+#sr-modal-view .sr-floating-window-drag-handle::before {
+    width: 2rem;
+    height: 0.25rem;
+    border-radius: var(--radius-s);
+    background: var(--text-faint);
+    content: "";
+}
+
+#sr-modal-view .sr-floating-window-drag-handle.is-dragging {
+    cursor: grabbing;
 }
 
 .is-mobile #sr-modal-view {

@@ -38,6 +38,8 @@ export class CardContainer {
     private pendingResumeTimeout: number | null = null;
 
     private response: ResponseSectionComponent;
+    private sourceStatus: HTMLDivElement;
+    private sessionRequested = false;
 
     private clozeInputs: NodeListOf<HTMLInputElement> | null = null;
     private clozeAnswers: NodeListOf<Element> | null = null;
@@ -60,6 +62,7 @@ export class CardContainer {
         showAnswerHandler: () => void,
         jumpToCurrentCardHandler: () => Promise<void>,
         displayCurrentCardInfoNoticeHandler: () => void,
+        manualReviewHandler: (days: number) => Promise<void>,
         closeModal?: () => void,
     ) {
         // Init properties
@@ -100,6 +103,8 @@ export class CardContainer {
             closeModal,
         );
 
+        this.sourceStatus = this.view.createDiv({ cls: "sr-source-status sr-is-hidden" });
+        this.sourceStatus.setAttribute("role", "status");
         this.scrollWrapper = this.view.createDiv();
         this.scrollWrapper.addClass("sr-scroll-wrapper");
 
@@ -111,6 +116,7 @@ export class CardContainer {
             settings,
             this.showAnswerHandler,
             this.processReviewHandler,
+            manualReviewHandler,
         );
     }
 
@@ -125,7 +131,9 @@ export class CardContainer {
             return;
         }
 
+        this.sessionRequested = true;
         await this.drawCardFront(sessionData, settings);
+        if (!this.sessionRequested) return;
 
         this.view.removeClass("sr-is-hidden");
         activeDocument.addEventListener("keydown", this._keydownHandler);
@@ -135,6 +143,8 @@ export class CardContainer {
      * Hides the FlashcardView if it is visible
      */
     closeSession() {
+        // Markdown 异步渲染期间关闭窗口时，也要取消尚未完成的打开操作。
+        this.sessionRequested = false;
         // Prevents the rest of code, from running if this was executed multiple times after one another
 
         if (this.view.hasClass("sr-is-hidden")) {
@@ -162,7 +172,12 @@ export class CardContainer {
         }
     }
 
-    public async drawCardFront(sessionData: SessionData, settings: SRSettings) {
+    /** 绘制问题；原文同步时 preserveFocus 为真，不移动编辑器焦点。 */
+    public async drawCardFront(
+        sessionData: SessionData,
+        settings: SRSettings,
+        preserveFocus = false,
+    ) {
         this.toolbar.setResetButtonDisabled(true);
         // Update current deck info
         this.cardState = sessionData.cardData.currentCardState;
@@ -179,9 +194,8 @@ export class CardContainer {
         this._setupClozeInputListeners();
 
         // auto-focus the first cloze input if this card is a cloze card
-        if (sessionData.currentQuestion.questionType === CardType.Cloze) {
-            const firstInput: HTMLInputElement | null =
-                activeDocument.querySelector(".cloze-input");
+        if (!preserveFocus && sessionData.currentQuestion.questionType === CardType.Cloze) {
+            const firstInput: HTMLInputElement | null = this.view.querySelector(".cloze-input");
             if (firstInput) {
                 firstInput.focus();
             }
@@ -287,7 +301,7 @@ export class CardContainer {
     }
 
     private _setupClozeInputListeners(): void {
-        this.clozeInputs = activeDocument.querySelectorAll(".cloze-input");
+        this.clozeInputs = this.view.querySelectorAll(".cloze-input");
 
         this.clozeInputs.forEach((input) => {
             input.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -301,7 +315,7 @@ export class CardContainer {
         });
     }
     private _evaluateClozeAnswers(): void {
-        this.clozeAnswers = activeDocument.querySelectorAll(".cloze-answer");
+        this.clozeAnswers = this.view.querySelectorAll(".cloze-answer");
 
         if (this.clozeInputs !== null && this.clozeAnswers.length === this.clozeInputs.length) {
             for (let i = 0; i < this.clozeAnswers.length; i++) {
@@ -337,11 +351,13 @@ export class CardContainer {
         }
     }
 
+    /** 绘制答案和日期按钮；同步刷新保留原文焦点，不触发复习提交。 */
     public async drawBack(
         sessionData: SessionData,
         reviewMode: FlashcardReviewMode,
         settings: SRSettings,
         determineButtonSchedule: (response: ReviewResponse) => RepItemScheduleInfo | null,
+        preserveFocus = false,
     ) {
         this.setCustomHotKeyState(settings.useCustomHotkeys);
         this.cardState = sessionData.cardData.currentCardState;
@@ -374,19 +390,21 @@ export class CardContainer {
         this._evaluateClozeAnswers();
 
         // Show response buttons
-        this.response.showRatingButtons(
-            reviewMode,
-            settings.flashcardAgainText,
-            settings.flashcardHardText,
-            settings.flashcardGoodText,
-            settings.flashcardEasyText,
-            settings.showIntervalInReviewButtons,
-            determineButtonSchedule,
-        );
+        this.response.showRatingButtons(reviewMode, settings, determineButtonSchedule);
         // NEW: restore keyboard focus after cloze confirmation
         if (this.plugin.uiManager === null) throw new Error("UI manager not initialized!!!");
-        this.plugin.uiManager.setSRViewInFocus(true);
-        this.response.againButton.buttonEl.focus();
+        if (!preserveFocus && this.sessionRequested) {
+            this.plugin.uiManager.setSRViewInFocus(true);
+            this.response.againButton.buttonEl.focus();
+        }
+    }
+
+    /** 显示同步/失效信息，并统一禁用评分；不清空当前问题和答案。 */
+    public setSourceStatus(message: string, disabled: boolean): void {
+        this.sourceStatus.setText(message);
+        this.sourceStatus.toggleClass("sr-is-hidden", !message);
+        this.response.setDisabled(disabled);
+        this.toolbar.setResetButtonDisabled(disabled || this.cardState !== CardState.Back);
     }
 
     private _keydownHandler = (e: KeyboardEvent) => {
@@ -394,6 +412,11 @@ export class CardContainer {
         if (this.plugin.uiManager === null) throw new Error("UI manager not initialized!!!");
         // Prevents any input, if the edit modal is open or if the view is not in focus
         if (
+            !this.view.contains(e.target as Node) ||
+            (e.target as HTMLElement)?.isContentEditable ||
+            e.ctrlKey ||
+            e.metaKey ||
+            e.altKey ||
             this.plugin.dataManager.data.settings.useCustomHotkeys ||
             (activeDocument.activeElement !== null &&
                 (activeDocument.activeElement.nodeName === "TEXTAREA" ||
@@ -426,41 +449,14 @@ export class CardContainer {
                 if (this.cardState === CardState.Front) {
                     this.showAnswerHandler();
                     consumeKeyEvent();
-                } else if (this.cardState === CardState.Back) {
-                    void this.processReviewHandler(ReviewResponse.Good);
-                    consumeKeyEvent();
                 }
-                break;
-            case "Numpad1":
-            case "Digit1":
-                if (this.cardState !== CardState.Back) {
-                    break;
-                }
-                void this.processReviewHandler(ReviewResponse.Hard);
-                consumeKeyEvent();
-                break;
-            case "Numpad2":
-            case "Digit2":
-                if (this.cardState !== CardState.Back) {
-                    break;
-                }
-                void this.processReviewHandler(ReviewResponse.Good);
-                consumeKeyEvent();
-                break;
-            case "Numpad3":
-            case "Digit3":
-                if (this.cardState !== CardState.Back) {
-                    break;
-                }
-                void this.processReviewHandler(ReviewResponse.Easy);
-                consumeKeyEvent();
                 break;
             case "Numpad0":
             case "Digit0":
                 if (this.cardState !== CardState.Back) {
                     break;
                 }
-                void this.processReviewHandler(ReviewResponse.Reset);
+                void this.processReviewHandler(ReviewResponse.Again);
                 consumeKeyEvent();
                 break;
             default:

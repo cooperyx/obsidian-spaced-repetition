@@ -1,5 +1,5 @@
 import { now } from "moment";
-import { App, MarkdownView, Notice, Platform } from "obsidian";
+import { App, EventRef, MarkdownView, Notice } from "obsidian";
 
 import { DataManager } from "src/data/data-manager";
 import { Card } from "src/data/data-structures/card/card";
@@ -9,6 +9,7 @@ import { SRSettings } from "src/data/settings";
 import { t } from "src/lang/helpers";
 import SRPlugin from "src/main";
 import { Note } from "src/note/note";
+import { refreshReviewNote } from "src/note/refresh-review-note";
 import { RepItemScheduleInfo } from "src/scheduling/algorithms/base/rep-item-schedule-info";
 import { ReviewResponse } from "src/scheduling/algorithms/base/repetition-item";
 import {
@@ -20,10 +21,8 @@ import { CardContainer } from "src/ui/obsidian-ui-components/content-container/c
 import CardInfoNotice from "src/ui/obsidian-ui-components/content-container/card-container/toolbar/toolbar-buttons/card-info-notice";
 import { DeckContainer } from "src/ui/obsidian-ui-components/content-container/deck-container/deck-container";
 import { ConfirmationModal } from "src/ui/obsidian-ui-components/modals/confirmation-modal";
-import { FlashcardEditModal } from "src/ui/obsidian-ui-components/modals/edit-modal";
 import { ReviewQueueLoader } from "src/ui/review-queue-loader";
 import { UIManager, UIState } from "src/ui/ui-manager";
-import EmulatedPlatform from "src/utils/platform-detector";
 
 export enum ContentState {
     Deck,
@@ -88,6 +87,11 @@ export default class ContentManager {
 
     private lastPressedOnProcessReview: number = 0;
     private pendingResumeTimeout: number | null = null;
+    private sourceEvents: EventRef[] = [];
+    private workspaceEvents: EventRef[] = [];
+    private busy = false;
+    private refreshQueued = false;
+    private isOpen = false;
 
     constructor(
         app: App,
@@ -126,11 +130,18 @@ export default class ContentManager {
             this._showAnswer.bind(this),
             this._jumpToCurrentCard.bind(this),
             this._displayCurrentCardInfoNotice.bind(this),
+            this._processManualReview.bind(this),
             closeModal,
         );
     }
 
+    /** 关闭会话并移除原文监听，阻止尚未完成的异步操作重新显示窗口。 */
     public close() {
+        this.isOpen = false;
+        this.sourceEvents.forEach((event) => this.app.vault.offref(event));
+        this.workspaceEvents.forEach((event) => this.app.workspace.offref(event));
+        this.sourceEvents = [];
+        this.workspaceEvents = [];
         this._clearPendingResumeTimeout();
         this.uiManager.setSRViewInFocus(false);
         this.deckContainer.closeList();
@@ -138,9 +149,24 @@ export default class ContentManager {
         this.uiManager.setUIState(UIState.Closed);
     }
 
+    /** 加载复习队列，并只在当前会话存活期间监听原文保存与编辑。 */
     public async open() {
+        this.isOpen = true;
+        const onFileChange = (file: { path: string }) => {
+            if (file.path === this.reviewSequencer?.currentNote?.filePath)
+                this.queueSourceRefresh();
+        };
+        this.sourceEvents = [
+            this.app.vault.on("modify", onFileChange),
+            this.app.vault.on("delete", onFileChange),
+            this.app.vault.on("rename", () => this.queueSourceRefresh()),
+        ];
+        this.workspaceEvents = [
+            this.app.workspace.on("editor-change", () => this.queueSourceRefresh()),
+        ];
         // Prepare a review queue to display
         this.reviewSequencer = await this.reviewQueueLoader.loadReviewQueue();
+        if (!this.isOpen) return;
 
         // Determine if the card view should be opened immediately
         const subdecksWithCardsInQueue: Deck[] = this.reviewSequencer.getSubDecksWithCardsInQueue(
@@ -182,6 +208,7 @@ export default class ContentManager {
     // MARK: Content Manager
 
     private async _showDecksList(reloadReviewQueue: boolean = false): Promise<void> {
+        if (!this.isOpen) return;
         this._clearPendingResumeTimeout();
         if (reloadReviewQueue) {
             this.reviewSequencer = await this.reviewQueueLoader.loadReviewQueue();
@@ -198,6 +225,7 @@ export default class ContentManager {
         if (this.sessionData === null) return;
         this.uiManager.setUIState(UIState.CardFront);
         await this.cardContainer.openSession(this.sessionData, this.settings);
+        await this.syncCurrentSource();
     }
 
     private async _showNextCard(): Promise<void> {
@@ -254,6 +282,7 @@ export default class ContentManager {
             this.sessionData.cardData.currentCard !== undefined
         ) {
             await this.cardContainer.drawCardFront(this.sessionData, this.settings);
+            await this.syncCurrentSource();
         } else {
             await this._showDecksList(true);
         }
@@ -342,128 +371,68 @@ export default class ContentManager {
             t("CANCEL"),
             async () => {
                 if (this.sessionData === null || this.reviewSequencer === null) return;
-                await this.reviewSequencer.deleteCurrentCardFromNote();
-                await this._showNextCard();
+                await this.withCurrentSource(async () => {
+                    const note = this.reviewSequencer.currentNote;
+                    await this.reviewSequencer.deleteCurrentCardFromNote();
+                    refreshReviewNote(note, this.settings, await note.file.read());
+                    await this._showNextCard();
+                });
             },
         ).open();
     }
 
+    /** 显示答案与保存事件串行执行，防止刷新覆盖刚显示的答案。 */
     public async _showAnswer() {
-        if (this.sessionData === null) return;
-
+        if (this.sessionData === null || this.busy) return;
         const timeNow = now();
-        if (
-            this.lastPressedOnProcessReview &&
-            timeNow - this.lastPressedOnProcessReview <
-                this.dataManager.data.settings.reviewButtonDelay
-        ) {
-            return;
-        }
-        this.lastPressedOnProcessReview = timeNow;
-
-        this.uiManager.setUIState(UIState.CardBack);
-        this.sessionData.cardData.currentCardState = CardState.Back;
-
-        await this.cardContainer.drawBack(
-            this.sessionData,
-            this.reviewMode,
-            this.settings,
-            this._determineButtonSchedule.bind(this),
-        );
-    }
-
-    private async _doEditQuestionText(): Promise<void> {
-        if (this.reviewSequencer === null) return;
-        const currentCard: Card | null = this.reviewSequencer.currentCard;
-        const currentQ: Question = this.reviewSequencer.currentQuestion;
-
-        // Just the question/answer text; without any preceding topic tag
-        const textPrompt = currentQ.questionText.actualQuestion;
-        const currentUIState = this.uiManager.uiState;
-        this.uiManager.setUIState(UIState.EditModal);
-        const editModal = FlashcardEditModal.Prompt(
-            this.app,
-            this.settings,
-            currentCard,
-            textPrompt,
-            currentQ.questionText.textDirection,
-        );
-        await editModal
-            .then(async (modifiedCardText) => {
-                if (this.reviewSequencer === null) return;
-                await this.reviewSequencer.updateCurrentQuestionTextAndCards(modifiedCardText);
-                this.uiManager.setUIState(currentUIState);
-
-                if (this.sessionData !== null) {
-                    if (this.uiManager.uiState === UIState.CardFront) {
-                        await this.cardContainer.drawCardFront(this.sessionData, this.settings);
-                    }
-
-                    if (this.uiManager.uiState === UIState.CardBack) {
-                        await this.cardContainer.drawBack(
-                            this.sessionData,
-                            this.reviewMode,
-                            this.settings,
-                            this._determineButtonSchedule.bind(this),
-                        );
-                    }
-                }
-            })
-            .catch((reason) => console.log(reason));
-    }
-
-    public async _jumpToCurrentCard(): Promise<void> {
-        if (this.reviewSequencer === null) return;
-        const currentQuestion = this.reviewSequencer.currentQuestion;
-        if (!currentQuestion) return;
-
-        if (
-            (!this.settings.openViewInNewTab &&
-                !(Platform.isMobile || EmulatedPlatform().isMobile)) ||
-            (!this.settings.openViewInNewTabMobile &&
-                (Platform.isMobile || EmulatedPlatform().isMobile))
-        ) {
-            new Notice("Note was opened in new tab in the background");
-        }
-
-        const file = currentQuestion.note.file.tfile;
-        const blockId = currentQuestion.questionText.obsidianBlockId;
-        const line = Math.max(0, currentQuestion.lineNo ?? 0);
-
-        if (blockId) {
-            await this.app.workspace.openLinkText(`${file.path}#${blockId}`, file.path, false);
-            return;
-        }
-
-        // If the file is already open in another leaf, open it in the current one to prevent duplicates
-        const existingLeaf = this.app.workspace.getLeavesOfType("markdown").find((leaf) => {
-            const view = leaf.view as MarkdownView;
-            return view.file?.path === file.path;
+        if (timeNow - this.lastPressedOnProcessReview < this.settings.reviewButtonDelay) return;
+        await this.withCurrentSource(async () => {
+            this.lastPressedOnProcessReview = timeNow;
+            this.uiManager.setUIState(UIState.CardBack);
+            this.sessionData.cardData.currentCardState = CardState.Back;
+            await this.cardContainer.drawBack(
+                this.sessionData,
+                this.reviewMode,
+                this.settings,
+                this._determineButtonSchedule.bind(this),
+            );
         });
+    }
 
-        if (existingLeaf) {
-            await existingLeaf.openFile(file, { eState: { line } });
-            this.app.workspace.setActiveLeaf(existingLeaf);
-            const markdownView = existingLeaf.view as MarkdownView;
-            if (markdownView?.editor) {
-                markdownView.editor.setCursor({ line, ch: 0 });
-                markdownView.editor.scrollIntoView({ from: { line, ch: 0 }, to: { line, ch: 0 } });
-            }
-            return;
-        }
+    /** 编辑入口直接进入已定位的原文，避免同时维护第二份可写卡片副本。 */
+    private async _doEditQuestionText(): Promise<void> {
+        await this._jumpToCurrentCard();
+    }
 
-        const leaf = this.app.workspace.getLeaf("tab");
-        await leaf.openFile(file, { eState: { line } });
-
-        const markdownView = leaf.view as MarkdownView;
-        if (markdownView?.editor) {
-            markdownView.editor.setCursor({ line, ch: 0 });
-            markdownView.editor.scrollIntoView({ from: { line, ch: 0 }, to: { line, ch: 0 } });
-        }
+    /** 在可编辑 Markdown 视图定位当前源行，不推进队列或提交复习。 */
+    public async _jumpToCurrentCard(): Promise<void> {
+        await this.withCurrentSource(async () => {
+            const question = this.reviewSequencer.currentQuestion;
+            const file = question.note.file.tfile;
+            const line = question.lineNo;
+            const leaf =
+                this.app.workspace
+                    .getLeavesOfType("markdown")
+                    .find((item) => (item.view as MarkdownView).file?.path === file.path) ??
+                this.app.workspace.getLeaf("tab");
+            await leaf.openFile(file, { active: true, eState: { line } });
+            await leaf.setViewState({
+                type: "markdown",
+                state: { ...leaf.getViewState().state, file: file.path, mode: "source" },
+                active: true,
+            });
+            await this.app.workspace.revealLeaf(leaf);
+            const view = leaf.view as MarkdownView;
+            const position = { line, ch: 0 };
+            view.editor.setCursor(position);
+            view.editor.scrollIntoView({ from: position, to: position }, true);
+            view.editor.focus();
+            this.uiManager.setSRViewInFocus(false);
+        });
     }
 
     public async _skipCurrentCard() {
-        if (this.reviewSequencer === null) return;
+        if (this.reviewSequencer === null || this.busy) return;
         this.reviewSequencer.skipCurrentCard();
         await this._showNextCard();
     }
@@ -476,19 +445,113 @@ export default class ContentManager {
         );
     }
 
+    /** Again 保留上游行为；旧 Hard/Good/Easy 快捷命令不再提交普通复习。 */
     public async _processReview(response: ReviewResponse): Promise<void> {
-        if (this.reviewSequencer === null) return;
-        const timeNow = now();
         if (
-            timeNow - this.lastPressedOnProcessReview <
-            this.dataManager.data.settings.reviewButtonDelay
-        ) {
+            this.reviewMode === FlashcardReviewMode.Review &&
+            response !== ReviewResponse.Again &&
+            response !== ReviewResponse.Reset
+        )
+            return;
+        await this.submitReview(() => this.reviewSequencer.processReview(response));
+    }
+
+    /** 将所选自然日交给调度器，持久化成功后才进入下一张。 */
+    public async _processManualReview(days: number): Promise<void> {
+        await this.submitReview(() => this.reviewSequencer.processManualReview(days));
+    }
+
+    private async submitReview(review: () => Promise<void>): Promise<void> {
+        if (this.sessionData?.cardData.currentCardState !== CardState.Back) return;
+        const timeNow = now();
+        if (timeNow - this.lastPressedOnProcessReview < this.settings.reviewButtonDelay) return;
+        await this.withCurrentSource(async () => {
+            this.lastPressedOnProcessReview = timeNow;
+            const note = this.reviewSequencer.currentNote;
+            await review();
+            refreshReviewNote(note, this.settings, await note.file.read());
+            if (this.isOpen) await this._showNextCard();
+        });
+    }
+
+    /** 保存事件只串行刷新当前会话；评分期间收到的事件在写入结束后处理。 */
+    private queueSourceRefresh(): void {
+        if (!this.isOpen || !this.sessionData || !this.reviewSequencer?.currentQuestion) return;
+        if (this.busy) {
+            this.refreshQueued = true;
             return;
         }
-        this.lastPressedOnProcessReview = timeNow;
+        void this.withCurrentSource(async () => {});
+    }
 
-        await this.reviewSequencer.processReview(response);
-        await this._showNextCard();
+    private async withCurrentSource(action: () => Promise<void>): Promise<void> {
+        if (!this.isOpen || this.busy || !this.reviewSequencer?.currentQuestion) return;
+        this.busy = true;
+        try {
+            this.cardContainer.setSourceStatus("正在同步原文…", true);
+            if (!(await this.syncCurrentSource())) return;
+            if (!this.isOpen) return;
+            this.cardContainer.setSourceStatus("", true);
+            await action();
+            if (this.isOpen) await this.syncCurrentSource();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "读取或保存卡片失败，请重试。";
+            this.cardContainer.setSourceStatus(message, true);
+            new Notice(message);
+        } finally {
+            this.busy = false;
+            if (this.refreshQueued) {
+                this.refreshQueued = false;
+                this.queueSourceRefresh();
+            }
+        }
+    }
+
+    /** 重读保存后的内容，并保持当前卡片、答案状态和队列对象不变。 */
+    private async syncCurrentSource(): Promise<boolean> {
+        const question = this.reviewSequencer?.currentQuestion;
+        if (!question || !this.sessionData || !this.isOpen) return false;
+        const note = question.note;
+        if (!this.app.vault.getAbstractFileByPath(note.filePath)) {
+            this.cardContainer.setSourceStatus(
+                "原文件已不存在，不能继续评分。可跳过或返回卡组。",
+                true,
+            );
+            return false;
+        }
+        const source = await note.file.read();
+        if (!this.isOpen) return false;
+        const changed = refreshReviewNote(note, this.settings, source);
+        if (question.reviewSourceInvalid) {
+            this.cardContainer.setSourceStatus(
+                "当前卡片已删除、语法失效或无法可靠定位。请跳过或返回卡组重新载入。",
+                true,
+            );
+            return false;
+        }
+        if (changed) {
+            if (this.sessionData.cardData.currentCardState === CardState.Back) {
+                await this.cardContainer.drawBack(
+                    this.sessionData,
+                    this.reviewMode,
+                    this.settings,
+                    this._determineButtonSchedule.bind(this),
+                    true,
+                );
+            } else {
+                await this.cardContainer.drawCardFront(this.sessionData, this.settings, true);
+            }
+        }
+        const unsaved = this.app.workspace.getLeavesOfType("markdown").some((leaf) => {
+            const view = leaf.view as MarkdownView;
+            return (
+                view.file?.path === note.filePath &&
+                view.getMode() === "source" &&
+                view.editor.getValue().replaceAll("\r\n", "\n") !== source.replaceAll("\r\n", "\n")
+            );
+        });
+        this.cardContainer.setSourceStatus(unsaved ? "等待 Obsidian 保存原文…" : "", unsaved);
+        return !unsaved;
     }
 
     // MARK: Deck button handlers

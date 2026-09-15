@@ -6,6 +6,8 @@ import { SRSettings } from "src/data/settings";
 export class Note {
     file: ISRNoteTFile;
     questionList: Question[];
+    /** 解析时的原文快照，用于把保存后的源位置映射回同一张卡片。 */
+    sourceText?: string;
 
     get hasChanged(): boolean {
         return this.questionList.some((question) => question.hasChanged);

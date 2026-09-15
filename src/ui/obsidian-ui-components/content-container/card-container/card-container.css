@@ -61,3 +61,10 @@
         }
     }
 }
+
+.sr-source-status {
+    padding: 8px 12px;
+    color: var(--text-warning);
+    background: var(--background-secondary);
+    flex-shrink: 0;
+}

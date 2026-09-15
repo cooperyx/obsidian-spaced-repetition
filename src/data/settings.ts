@@ -7,6 +7,7 @@ export interface SRSettings {
     // flashcards
     flashcardTags: string[];
     flashcardTagsToIgnore: string[];
+    manualReviewDays: number[];
     convertFoldersToDecks: boolean;
     burySiblingCards: boolean;
     randomizeCardOrder: boolean | undefined;
@@ -95,10 +96,13 @@ export interface SRSettings {
     preferredLocale: string;
 }
 
+export const DEFAULT_MANUAL_REVIEW_DAYS: number[] = [1, 2, 3, 5, 7, 10, 14, 30, 60, 90];
+
 export const DEFAULT_SETTINGS: SRSettings = {
     // flashcards
     flashcardTags: ["#flashcards"],
     flashcardTagsToIgnore: [],
+    manualReviewDays: [...DEFAULT_MANUAL_REVIEW_DAYS],
     convertFoldersToDecks: false,
     burySiblingCards: false,
     flashcardCardOrder: "DueFirstRandom",
@@ -237,6 +241,11 @@ export function upgradeSettings(settings: SRSettings) {
         settings.fsrsDesiredRetention = DEFAULT_SETTINGS.fsrsDesiredRetention;
     }
 
+    // 手动复习按钮必须对应唯一的正整数自然日；损坏的旧配置回退到默认档位。
+    if (!SettingsUtil.isValidManualReviewDays(settings.manualReviewDays)) {
+        settings.manualReviewDays = [...DEFAULT_MANUAL_REVIEW_DAYS];
+    }
+
     // Only published reminder settings are upgraded here. We deliberately do not preserve
     // unpublished draft field names from this feature branch, so the shipped schema stays clean.
     if (settings.enableReviewReminders === null || settings.enableReviewReminders === undefined) {
@@ -289,6 +298,20 @@ export function upgradeSettings(settings: SRSettings) {
 }
 
 export class SettingsUtil {
+    /**
+     * 检查手动复习档位是否可安全地作为“第 N 个自然日”使用。
+     *
+     * 配置顺序决定按钮显示顺序，因此不排序；只拒绝空值、重复值和非正整数。
+     */
+    static isValidManualReviewDays(value: unknown): value is number[] {
+        return (
+            Array.isArray(value) &&
+            value.length > 0 &&
+            value.every((day) => Number.isSafeInteger(day) && day > 0) &&
+            new Set(value).size === value.length
+        );
+    }
+
     static isFlashcardTag(settings: SRSettings, tag: string): boolean {
         return SettingsUtil.isTagInList(settings.flashcardTags, tag);
     }

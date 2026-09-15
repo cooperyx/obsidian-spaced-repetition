@@ -47,3 +47,12 @@ env.sh
 # AI Tooling
 .claude/
 .sourcerer/
+
+# Local configuration and release artifacts
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+release/
+*.zip

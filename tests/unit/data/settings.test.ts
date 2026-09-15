@@ -1,6 +1,25 @@
-import { DEFAULT_SETTINGS, SettingsUtil, SRSettings, upgradeSettings } from "src/data/settings";
+import {
+    DEFAULT_MANUAL_REVIEW_DAYS,
+    DEFAULT_SETTINGS,
+    SettingsUtil,
+    SRSettings,
+    upgradeSettings,
+} from "src/data/settings";
 
 describe("SettingsUtil", () => {
+    test("validates and upgrades manual review day settings", () => {
+        expect(DEFAULT_SETTINGS.manualReviewDays).toEqual(DEFAULT_MANUAL_REVIEW_DAYS);
+        expect(SettingsUtil.isValidManualReviewDays([1, 3, 7])).toEqual(true);
+        expect(SettingsUtil.isValidManualReviewDays([1, 1])).toEqual(false);
+        expect(SettingsUtil.isValidManualReviewDays([0, 1])).toEqual(false);
+        expect(SettingsUtil.isValidManualReviewDays([1.5])).toEqual(false);
+
+        const settings = { ...DEFAULT_SETTINGS, manualReviewDays: [1, 1, -2] };
+        upgradeSettings(settings);
+        expect(settings.manualReviewDays).toEqual(DEFAULT_MANUAL_REVIEW_DAYS);
+        expect(settings.manualReviewDays).not.toBe(DEFAULT_MANUAL_REVIEW_DAYS);
+    });
+
     test("isPathInNoteIgnoreFolder", () => {
         const settings: SRSettings = { ...DEFAULT_SETTINGS, noteFoldersToIgnore: ["/test"] };
         expect(SettingsUtil.isPathInFoldersToIgnore(settings, "/test/test")).toEqual(true);

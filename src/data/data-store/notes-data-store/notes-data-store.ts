@@ -4,9 +4,10 @@ import { IFileModifier } from "src/data/data-store/base/file-modifier";
 import { RepItemStorageInfo } from "src/data/data-store/base/rep-item-storage-info";
 import { Question } from "src/data/data-structures/card/questions/question";
 import { SRSettings } from "src/data/settings";
+import { refreshReviewNote } from "src/note/refresh-review-note";
+import { replaceQuestionSource } from "src/note/replace-question-source";
 import { RepItemScheduleInfo } from "src/scheduling/algorithms/base/rep-item-schedule-info";
 import { CommentParser } from "src/utils/comment-parser";
-import { MultiLineTextFinder } from "src/utils/strings";
 
 export class NotesDataStore implements IDataStore {
     public readonly storageType = StorageType.NOTES;
@@ -81,33 +82,42 @@ export class NotesDataStore implements IDataStore {
         await this.write(question);
     }
 
-    /**
-     * Writes a question to the data store.
-     *
-     * @param question
-     * @returns
-     */
+    /** 原子保存已核实的卡片；源快照冲突时抛错，成功后同步队列内的源位置。 */
     async write(question: Question): Promise<void> {
-        const fileText: string = await question.note.file.read();
-        const newText: string = question.updateQuestionWithinNoteText(fileText, this.settings);
-        await question.note.file.write(newText);
+        const previousQuestionText = question.questionText;
+        const update = (fileText: string): string => {
+            // 同步后到点击评分之间如果又发生保存，拒绝旧快照并让界面重新同步。
+            if (question.note.sourceText !== undefined && question.note.sourceText !== fileText) {
+                throw new Error("原文正在保存，请等待卡片同步后重试。");
+            }
+            return question.updateQuestionWithinNoteText(fileText, this.settings);
+        };
+        let saved: string;
+        try {
+            if (question.note.file.process) {
+                saved = await question.note.file.process(update);
+            } else {
+                saved = update(await question.note.file.read());
+                await question.note.file.write(saved);
+            }
+        } catch (error) {
+            question.questionText = previousQuestionText;
+            throw error;
+        }
+        if (question.note.sourceText !== undefined)
+            refreshReviewNote(question.note, this.settings, saved);
         question.hasChanged = false;
     }
 
-    /**
-     * Deletes a question from the data store.
-     *
-     * @param question
-     * @returns
-     */
+    /** 仅删除当前卡片的源范围；原文又被修改时拒绝删除，避免误删同文卡片。 */
     async delete(question: Question): Promise<void> {
-        const fileText: string = await question.note.file.read();
-        const originalText: string = question.questionText.original;
-        const newText = MultiLineTextFinder.findAndReplace(fileText, originalText, "");
-
-        // Only write if note hasn't changed
-        if (newText) {
-            await question.note.file.write(newText);
-        }
+        const update = (text: string): string => {
+            if (question.note.sourceText !== undefined && question.note.sourceText !== text) {
+                throw new Error("原文正在保存，请等待卡片同步后重试。");
+            }
+            return replaceQuestionSource(text, question.questionText.original, "", question.lineNo);
+        };
+        if (question.note.file.process) await question.note.file.process(update);
+        else await question.note.file.write(update(await question.note.file.read()));
     }
 }

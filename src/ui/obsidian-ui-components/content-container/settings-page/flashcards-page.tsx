@@ -1,7 +1,7 @@
-import { Setting, SettingGroup } from "obsidian";
+import { Notice, Setting, SettingGroup } from "obsidian";
 
 import { DataManager } from "src/data/data-manager";
-import { DEFAULT_SETTINGS } from "src/data/settings";
+import { DEFAULT_SETTINGS, SettingsUtil } from "src/data/settings";
 import { SettingsManager } from "src/data/settings-manager";
 import { t, tHTML } from "src/lang/helpers";
 import SRPlugin from "src/main";
@@ -133,6 +133,50 @@ export class FlashcardsPage extends SettingsPage {
                             .onChange(async (value) => {
                                 this.settingsManager.settings.burySiblingCards = value;
                                 await this.settingsManager.save();
+                            }),
+                    );
+            })
+            .addSetting((setting: Setting) => {
+                setting
+                    .setName("手动复习天数")
+                    .setDesc(
+                        "用逗号或空格分隔不重复的正整数，例如：1, 2, 3, 5, 7, 10, 14, 30, 60, 90。",
+                    )
+                    .addExtraButton((button) => {
+                        button
+                            .setIcon("reset")
+                            .setTooltip(t("RESET_DEFAULT"))
+                            .onClick(async () => {
+                                this.settingsManager.settings.manualReviewDays = [
+                                    ...DEFAULT_SETTINGS.manualReviewDays,
+                                ];
+                                await this.settingsManager.save();
+                                this.display();
+                            });
+                    })
+                    .addText((text) =>
+                        text
+                            .setValue(this.settingsManager.settings.manualReviewDays.join(", "))
+                            .onChange((value) => {
+                                this.applySettingsUpdate(async () => {
+                                    const days = value
+                                        .split(/[\s,，]+/)
+                                        .filter((part) => part.length > 0)
+                                        .map((part) => Number(part));
+
+                                    if (!SettingsUtil.isValidManualReviewDays(days)) {
+                                        new Notice("请输入不重复的正整数天数。");
+                                        text.setValue(
+                                            this.settingsManager.settings.manualReviewDays.join(
+                                                ", ",
+                                            ),
+                                        );
+                                        return;
+                                    }
+
+                                    this.settingsManager.settings.manualReviewDays = days;
+                                    await this.settingsManager.save();
+                                });
                             }),
                     );
             })

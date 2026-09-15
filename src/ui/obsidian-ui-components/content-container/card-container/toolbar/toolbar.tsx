@@ -10,6 +10,7 @@ import EditButtonComponent from "src/ui/obsidian-ui-components/content-container
 import ResetButtonComponent from "src/ui/obsidian-ui-components/content-container/card-container/toolbar/toolbar-buttons/reset-button";
 import SkipButtonComponent from "src/ui/obsidian-ui-components/content-container/card-container/toolbar/toolbar-buttons/skip-button";
 import ModalCloseButtonComponent from "src/ui/obsidian-ui-components/content-container/modal-close-button";
+import SRButtonComponent from "src/ui/sr-button";
 import EmulatedPlatform from "src/utils/platform-detector";
 
 export default class CardToolbarComponent {
@@ -49,6 +50,13 @@ export default class CardToolbarComponent {
         this.infoSection = new DeckInfoComponent(this.toolbar);
 
         this.toolbar.createDiv().addClass("sr-flex-spacer");
+
+        new SRButtonComponent(this.toolbar, {
+            classNames: ["sr-open-source-button"],
+            text: "打开原文",
+            tooltip: "定位当前卡片，并在原文中编辑",
+            onClick: jumpToCurrentCard,
+        });
 
         new EditButtonComponent(
             this.toolbar,

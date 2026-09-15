@@ -27,6 +27,7 @@ export class NoteParser {
         );
 
         const result: Note = new Note(noteFile, questions);
+        result.sourceText = questionParser.noteText;
         return result;
     }
 }
