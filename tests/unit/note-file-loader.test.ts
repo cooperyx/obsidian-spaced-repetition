@@ -25,6 +25,9 @@ Q3:::A3
         const file: UnitTestSRFile = new UnitTestSRFile(noteText);
         const note: Note = await noteFileLoader.load(file, TextDirection.Ltr, TopicPath.emptyPath);
         expect(note.hasChanged).toEqual(false);
+        // 正式复习队列经由 NoteFileLoader 构建；未编辑的笔记也必须带有源快照，
+        // 供首次同步确认当前卡片身份。
+        expect(note.sourceText).toEqual(noteText);
     });
 
     test("Multiple questions, some with too many schedule details", async () => {

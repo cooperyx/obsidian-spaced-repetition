@@ -4,8 +4,9 @@
 
 - 上游：[1.15.4](https://github.com/st3v3nmw/obsidian-spaced-repetition/releases/tag/1.15.4)，2026-06-14 发布。
 - 上游提交：`22fbea0a71ebd39fe29e0bc2d571aea4c42e10e4`。
-- 定制版本：`1.15.4-cooperyx.1`，仅限 Obsidian 桌面端个人使用。
+- 定制版本：`1.15.4-cooperyx.2`，仅限 Obsidian 桌面端个人使用。
 - 保持插件 ID `obsidian-spaced-repetition`，直接读取已有设置和笔记内的调度注释。
+- 本次修复：正式复习加载路径补齐原文快照，避免未编辑卡片首次同步时被误判失效；隐藏新版 Obsidian 额外添加的关闭按钮，保留工具栏关闭入口。
 
 ## PRD 评审结论
 

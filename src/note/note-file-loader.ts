@@ -35,6 +35,9 @@ export class NoteFileLoader {
         );
 
         const result: Note = new Note(noteFile, questionList);
+        // 复习队列中的 Question 会引用此 Note。首次同步前必须保留解析时的原文，
+        // 否则刷新器无法建立新旧卡片身份映射，并会把未编辑的卡片误判为失效。
+        result.sourceText = questionParser.noteText;
         return result;
     }
 }
