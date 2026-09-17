@@ -35,6 +35,16 @@
     & .sr-content .cloze-input {
         height: 1.4rem;
     }
+
+    /* 使用 Obsidian 原生 mark，保留代码和转义语法；色块仅强调问答卡内的重点。 */
+    & .sr-content.sr-multiline-question mark {
+        background-color: var(--text-highlight-bg, rgba(255, 208, 0, 0.35));
+        color: inherit;
+        padding: 0 0.15em;
+        border-radius: 0.2em;
+        -webkit-box-decoration-break: clone;
+        box-decoration-break: clone;
+    }
 }
 
 @media only screen and (orientation: landscape) {

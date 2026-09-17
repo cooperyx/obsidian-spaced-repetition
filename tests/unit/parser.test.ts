@@ -166,6 +166,21 @@ test("Test parsing of multi line basic cards", () => {
     expect(parseT("Question\n?\nAnswer", parserOptions)).toEqual([
         [CardType.MultiLineBasic, "Question\n?\nAnswer", 0, 2],
     ]);
+    // 问答卡内的高亮仅保留为强调；相邻独立高亮仍是 Cloze 卡。
+    expect(
+        parseT(
+            "问题 ==重点==\n?\n答案 ==强调==\n<!--SR:2021-08-11,4,270-->\n\n独立 ==挖空==",
+            parserOptions,
+        ),
+    ).toEqual([
+        [
+            CardType.MultiLineBasic,
+            "问题 ==重点==\n?\n答案 ==强调==\n<!--SR:2021-08-11,4,270-->",
+            0,
+            3,
+        ],
+        [CardType.Cloze, "独立 ==挖空==", 5, 5],
+    ]);
     expect(parseT("Question\n? \nAnswer", parserOptions)).toEqual([
         [CardType.MultiLineBasic, "Question\n?\nAnswer", 0, 2],
     ]);
@@ -259,6 +274,32 @@ test("Test parsing of multi line basic cards", () => {
             clozePatterns: [],
         }),
     ).toEqual([]);
+});
+
+test.each([
+    [
+        "题干高亮",
+        "问题 ==重点==\n?\n答案\n<!--SR:2021-08-11,4,270-->",
+        "问题 ==重点==\n?\n答案\n<!--SR:2021-08-11,4,270-->",
+    ],
+    [
+        "答案高亮",
+        "问题\n?\n答案 ==强调==\n<!--SR:2021-08-11,4,270-->",
+        "问题\n?\n答案 ==强调==\n<!--SR:2021-08-11,4,270-->",
+    ],
+    [
+        "题干和答案多处高亮",
+        "问题 ==一== 和 ==二==\n?\n答案 ==三== 与 ==四==\n<!--SR:2021-08-11,4,270-->",
+        "问题 ==一== 和 ==二==\n?\n答案 ==三== 与 ==四==\n<!--SR:2021-08-11,4,270-->",
+    ],
+    [
+        "CRLF 源文本",
+        "问题 ==重点==\r\n?\r\n答案 ==强调==\r\n<!--SR:2021-08-11,4,270-->",
+        "问题 ==重点==\n?\n答案 ==强调==\n<!--SR:2021-08-11,4,270-->",
+    ],
+])("多行问答的%s不生成额外 Cloze 卡", (_caseName, source, expectedText) => {
+    // 所有样例都带旧计划元数据，既验证卡类型，也验证解析后的源行号。
+    expect(parseT(source, parserOptions)).toEqual([[CardType.MultiLineBasic, expectedText, 0, 3]]);
 });
 
 test("Test parsing of multi line reversed cards", () => {

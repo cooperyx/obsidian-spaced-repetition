@@ -213,9 +213,14 @@ export class CardContainer {
         }
     }
 
+    /** 问答卡沿用 Markdown 高亮渲染，以独立样式显示色块，保留原文中的等号语法。 */
     private async drawCardFrontContent(sessionData: SessionData, settings: SRSettings) {
-        // Update card content
         this.content.empty();
+        // 只标记多行问答区域，卡片切换时同步清除，避免影响独立挖空卡的提示和答案。
+        this.content.toggleClass(
+            "sr-multiline-question",
+            sessionData.currentQuestion.questionType === CardType.MultiLineBasic,
+        );
 
         // Create context section
         this.drawCardContext(sessionData, settings);

@@ -21,6 +21,42 @@ async function parseReviewNote(
 }
 
 describe("refreshReviewNote", () => {
+    test("问答内增删高亮保持同一张卡及计划，评分保留等号原文和卡外计划", async () => {
+        const source = `#flashcards
+
+问题
+?
+答案 ==原重点==
+<!--SR:!2023-09-10,4,270-->
+
+独立 ==挖空==
+<!--SR:!2023-09-11,5,280-->`;
+        const { file, note } = await parseReviewNote(source);
+        const question = note.questionList[0];
+        const currentCard = question.cards[0];
+        // 一次保存可能同时编辑题干和答案；问答类型和子卡片数量保持不变。
+        const edited = source.replace(
+            "问题\n?\n答案 ==原重点==",
+            "问题 ==新重点==\n?\n答案 原重点和 ==另一重点==",
+        );
+        file.content = edited;
+
+        expect(refreshReviewNote(note, DEFAULT_SETTINGS, edited)).toBe(true);
+        expect(question.reviewSourceInvalid).toBe(false);
+        expect(question.cards).toEqual([currentCard]);
+        expect(question.cards[0]).toBe(currentCard);
+        expect(currentCard.front).toBe("问题 ==新重点==");
+        expect(currentCard.back).toBe("答案 原重点和 ==另一重点==");
+        expect(currentCard.scheduleInfo.dueDate.format("YYYY-MM-DD")).toBe("2023-09-10");
+
+        currentCard.scheduleInfo = RepItemScheduleInfoOsr.fromDueDateStr("2023-09-18", 3, 270);
+        await DataStore.getInstance().writeSchedule(question);
+        expect(file.content).toContain("问题 ==新重点==\n?\n答案 原重点和 ==另一重点==");
+        expect(file.content).toContain("<!--SR:!2023-09-18,3,270-->");
+        expect(file.content).toContain("独立 ==挖空==\n<!--SR:!2023-09-11,5,280-->");
+        expect(note.questionList.map((q) => q.cards.length)).toEqual([1, 1]);
+    });
+
     test("同步编辑后的重复卡，并且保存计划只改当前卡片", async () => {
         const source = `#flashcards 重复::答案
 <!--SR:!2023-09-10,4,270-->
